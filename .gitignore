@@ -1,0 +1,19 @@
+# Datasets
+train/
+test/
+
+# Data files
+*.csv
+*.pdf
+pdf_content.txt
+
+# Python / PyTorch Cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+*.pt
+*.pth
