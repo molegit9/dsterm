@@ -80,7 +80,43 @@ def get_calendar_features(year, month, soon, season):
     
     return [y_norm, m_sin, m_cos, s_sin, s_cos] + season_oh
 
-# Item specifications and filters for train, sanji, and domae (Requirement 2)
+# Helper for rolling sequence features (rolling means & EMA)
+def compute_seq_features(seq):
+    roll_3 = []
+    for i in range(9):
+        if i == 0:
+            val = seq[0]
+        elif i == 1:
+            val = (seq[0] + seq[1]) / 2.0
+        else:
+            val = (seq[i-2] + seq[i-1] + seq[i]) / 3.0
+        roll_3.append(val)
+        
+    roll_5 = []
+    for i in range(9):
+        if i == 0:
+            val = seq[0]
+        elif i == 1:
+            val = (seq[0] + seq[1]) / 2.0
+        elif i == 2:
+            val = (seq[0] + seq[1] + seq[2]) / 3.0
+        elif i == 3:
+            val = (seq[0] + seq[1] + seq[2] + seq[3]) / 4.0
+        else:
+            val = (seq[i-4] + seq[i-3] + seq[i-2] + seq[i-1] + seq[i]) / 5.0
+        roll_5.append(val)
+        
+    ema_3 = []
+    alpha = 0.5
+    current_ema = seq[0]
+    ema_3.append(current_ema)
+    for i in range(1, 9):
+        current_ema = alpha * seq[i] + (1 - alpha) * current_ema
+        ema_3.append(current_ema)
+        
+    return roll_3, roll_5, ema_3
+
+# Item specifications and filters for train, sanji, and domae
 items_conditions = {
     '감자': {
         'train': lambda df: df[(df['품종명'] == '감자 수미') & (df['거래단위'] == '20키로상자') & (df['등급'] == '상')],
@@ -134,7 +170,7 @@ items_conditions = {
     }
 }
 
-# Dataset Definition for PyTorch (Requirement 3)
+# Dataset Definition for PyTorch (input_dim = 17: including rolling stats & EMA)
 class SequenceDataset(Dataset):
     def __init__(self, prices, seasonal_mean, sanji_mean, domae_mean, start_idx_list):
         self.prices = prices
@@ -155,13 +191,16 @@ class SequenceDataset(Dataset):
             
         target_prices = self.prices[start + 9 : start + 12]
         
+        in_p_scaled = in_prices / scale
+        roll_3, roll_5, ema_3 = compute_seq_features(in_p_scaled)
+        
         in_features = []
         for i in range(9):
             step_idx = start + i
             yr, m, sn, seas = flat_idx_to_date(step_idx)
             cal_feats = get_calendar_features(yr, m, sn, seas)
             
-            p_scaled = in_prices[i] / scale
+            p_scaled = in_p_scaled[i]
             sm_scaled = self.seasonal_mean[step_idx % 36] / scale
             sj_scaled = self.sanji_mean[step_idx % 36] / scale
             dm_scaled = self.domae_mean[step_idx % 36] / scale
@@ -171,8 +210,8 @@ class SequenceDataset(Dataset):
             else:
                 pct = (in_prices[i] - in_prices[i-1]) / (in_prices[i-1] + 1e-8)
                 
-            # 14차원 입력 피처 빌드: [p_scaled, sm_scaled, sj_scaled, dm_scaled, pct] + cal_feats
-            in_features.append([p_scaled, sm_scaled, sj_scaled, dm_scaled, pct] + cal_feats)
+            # 17차원 입력 피처 빌드: [p_scaled, sm_scaled, sj_scaled, dm_scaled, pct, roll_3, roll_5, ema_3] + cal_feats
+            in_features.append([p_scaled, sm_scaled, sj_scaled, dm_scaled, pct, roll_3[i], roll_5[i], ema_3[i]] + cal_feats)
             
         target_cal_features = []
         for i in range(3):
@@ -183,7 +222,6 @@ class SequenceDataset(Dataset):
             sj_scaled = self.sanji_mean[step_idx % 36] / scale
             dm_scaled = self.domae_mean[step_idx % 36] / scale
             
-            # 12차원 * 3시점 = 36차원 결합 타겟 피처 빌드
             target_cal_features.extend([sm_scaled, sj_scaled, dm_scaled] + cal_feats)
             
         return (
@@ -206,9 +244,9 @@ class CustomNMAELoss(nn.Module):
         loss = torch.sum(torch.abs(pred_actual - y_actual)) / (torch.sum(torch.abs(y_actual)) + 1e-8)
         return loss
 
-# PyTorch GRU-MLP 모델 아키텍처 (input_dim=14, target_cal_dim=36으로 확장)
+# PyTorch GRU-MLP 모델 아키텍처 (input_dim=17, target_cal_dim=36)
 class PriceGRUMLP(nn.Module):
-    def __init__(self, input_dim=14, target_cal_dim=36, hidden_dim=64):
+    def __init__(self, input_dim=17, target_cal_dim=36, hidden_dim=64):
         super(PriceGRUMLP, self).__init__()
         self.gru = nn.GRU(
             input_size=input_dim,
@@ -233,10 +271,11 @@ class PriceGRUMLP(nn.Module):
         out = self.mlp(concat)
         return out
 
-# LightGBM 41차원 스케일 정규화 피처 생성 함수 (Requirement 4)
+# LightGBM 68차원 스케일 정규화 피처 생성 함수 (including sequence rolling features)
 def get_lgbm_features_scaled(prices_series, seasonal_mean, sanji_mean, domae_mean, start_idx, horizon, scale):
     in_p = prices_series[start_idx : start_idx + 9]
     in_p_scaled = in_p / scale
+    roll_3, roll_5, ema_3 = compute_seq_features(in_p_scaled)
     
     yr_t, m_t, sn_t, seas_t = flat_idx_to_date(start_idx + 8)
     cal_feats_t = get_calendar_features(yr_t, m_t, sn_t, seas_t)
@@ -257,12 +296,15 @@ def get_lgbm_features_scaled(prices_series, seasonal_mean, sanji_mean, domae_mea
     
     feat = (
         list(in_p_scaled) + cal_feats_t + [sm_t_scaled, sj_t_scaled, dm_t_scaled] +
-        pct_changes + cal_feats_th + [sm_th_scaled, sj_th_scaled, dm_th_scaled]
+        pct_changes + cal_feats_th + [sm_th_scaled, sj_th_scaled, dm_th_scaled] +
+        list(roll_3) + list(roll_5) + list(ema_3)
     )
     return feat
 
 def get_test_lgbm_features_scaled(test_prices, seasonal_mean, sanji_mean, domae_mean, t_flat_idx, horizon, scale):
     in_p_scaled = test_prices / scale
+    roll_3, roll_5, ema_3 = compute_seq_features(in_p_scaled)
+    
     yr_t, m_t, sn_t, seas_t = flat_idx_to_date(t_flat_idx)
     cal_feats_t = get_calendar_features(yr_t, m_t, sn_t, seas_t)
     sm_t_scaled = seasonal_mean[t_flat_idx % 36] / scale
@@ -282,7 +324,8 @@ def get_test_lgbm_features_scaled(test_prices, seasonal_mean, sanji_mean, domae_
     
     feat = (
         list(in_p_scaled) + cal_feats_t + [sm_t_scaled, sj_t_scaled, dm_t_scaled] +
-        pct_changes + cal_feats_th + [sm_th_scaled, sj_th_scaled, dm_th_scaled]
+        pct_changes + cal_feats_th + [sm_th_scaled, sj_th_scaled, dm_th_scaled] +
+        list(roll_3) + list(roll_5) + list(ema_3)
     )
     return feat
 
@@ -295,7 +338,7 @@ def main():
     years_list = ["2018", "2019", "2020", "2021"]
     all_train_periods = [f"{y}{m}{s}" for y in years_list for m in months_list for s in soons_list]
     
-    # Load datasets (Requirement 1)
+    # Load datasets
     print("Loading train.csv...")
     train_df = pd.read_csv(train_path, encoding='utf-8-sig')
     print("Loading TRAIN_산지공판장_2018-2021.csv...")
@@ -340,7 +383,7 @@ def main():
             seasonal_cnt[p_idx] += 1
         train_seasonal_means[item] = seasonal_sum / seasonal_cnt
         
-        # [2] Sanji series (Requirement 2)
+        # [2] Sanji series
         if conds['sanji'] is not None:
             sub_sanji = conds['sanji'](sanji_df).copy()
             grouped_sj = sub_sanji.groupby('시점')['평균가(원/kg)'].mean().reset_index()
@@ -375,7 +418,7 @@ def main():
             if seasonal_cnt_sj[idx] > 0:
                 train_sanji_means[item][idx] = seasonal_sum_sj[idx] / seasonal_cnt_sj[idx]
                 
-        # [3] Domae series (Requirement 2)
+        # [3] Domae series
         if conds['domae'] is not None:
             sub_domae = conds['domae'](domae_df).copy()
             grouped_dm = sub_domae.groupby('시점')['평균가(원/kg)'].mean().reset_index()
@@ -413,7 +456,9 @@ def main():
     seeds = [42, 100, 2021, 2022, 2026] # 5-seed ensembling
     models_dict = {}
     lgbm_models_dict = {}
+    
     blended_val_nmaes = {}
+    best_blend_weights = {}
     
     for item in items_conditions.keys():
         print(f"\n======================================")
@@ -430,6 +475,12 @@ def main():
         models_dict[item] = []
         lgbm_models_dict[item] = []
         
+        # Setup arrays to accumulate validation predictions across seeds
+        gru_val_preds_total = np.zeros((len(val_indices), 3))
+        lgbm_val_preds_total = np.zeros((len(val_indices), 3))
+        val_actual_values = None
+        val_scales = None
+        
         for seed_idx, seed in enumerate(seeds):
             random.seed(seed)
             np.random.seed(seed)
@@ -439,11 +490,11 @@ def main():
                 
             print(f"[{item}] Training Seed {seed} ({seed_idx+1}/{len(seeds)})...")
             
-            # --- PyTorch GRU 모델 학습 (input_dim=14, target_cal_dim=36) ---
+            # --- PyTorch GRU Model Training (input_dim=17) ---
             train_dataset = SequenceDataset(prices, seasonal_mean, sanji_mean, domae_mean, train_indices)
             train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
             
-            model = PriceGRUMLP(input_dim=14, target_cal_dim=36, hidden_dim=64).to(device)
+            model = PriceGRUMLP(input_dim=17, target_cal_dim=36, hidden_dim=64).to(device)
             criterion = CustomNMAELoss()
             optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=180)
@@ -453,6 +504,8 @@ def main():
             
             best_val_loss = float('inf')
             best_model_state = None
+            patience = 35
+            patience_counter = 0
             
             for epoch in range(180):
                 model.train()
@@ -467,7 +520,7 @@ def main():
                     
                 scheduler.step()
                 
-                # Validation
+                # Validation with early stopping
                 model.eval()
                 val_loss = 0.0
                 with torch.no_grad():
@@ -481,11 +534,36 @@ def main():
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     best_model_state = model.state_dict().copy()
-                    
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        break
+                        
             model.load_state_dict(best_model_state)
             models_dict[item].append(model)
             
-            # --- LightGBM 모델 학습 (Scale Normalization 및 41차원 피처 적용) ---
+            # Predict validation using current seed's GRU
+            gru_val_preds_seed = []
+            val_actual_values_seed = []
+            val_scales_seed = []
+            
+            model.eval()
+            with torch.no_grad():
+                for x_seq, x_target_cal, y_target, scale in val_loader:
+                    x_seq, x_target_cal = x_seq.to(device), x_target_cal.to(device)
+                    pred_scaled = model(x_seq, x_target_cal).cpu().numpy()
+                    pred_actual = pred_scaled * scale.numpy()[:, None]
+                    gru_val_preds_seed.extend(pred_actual)
+                    val_actual_values_seed.extend(y_target.numpy() * scale.numpy()[:, None])
+                    val_scales_seed.extend(scale.numpy())
+            
+            gru_val_preds_total += np.array(gru_val_preds_seed) / len(seeds)
+            if val_actual_values is None:
+                val_actual_values = np.array(val_actual_values_seed)
+                val_scales = np.array(val_scales_seed)
+                
+            # --- LightGBM Model Training (68차원 피처 적용) ---
             lgbm_models = []
             for horizon in [1, 2, 3]:
                 lgbm_features = []
@@ -515,63 +593,43 @@ def main():
                 lgbm_models.append(lgbm_model)
             lgbm_models_dict[item].append(lgbm_models)
             
-        # --- 검증 셋 평가: 5개 시드 앙상블 블렌딩 ---
-        val_dataset = SequenceDataset(prices, seasonal_mean, sanji_mean, domae_mean, val_indices)
-        val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
-        
-        gru_val_preds_all = []
-        val_actual_values = []
-        val_scales = []
-        
-        for x_seq, x_target_cal, y_target, scale in val_loader:
-            x_seq, x_target_cal = x_seq.to(device), x_target_cal.to(device)
-            batch_preds = []
-            for model in models_dict[item]:
-                model.eval()
-                with torch.no_grad():
-                    pred_scaled = model(x_seq, x_target_cal).cpu().numpy()
-                    pred_actual = pred_scaled * scale.numpy()[:, None]
-                    batch_preds.append(pred_actual)
-            gru_val_preds_all.extend(np.mean(batch_preds, axis=0))
-            val_actual_values.extend(y_target.numpy() * scale.numpy()[:, None])
-            val_scales.extend(scale.numpy())
-            
-        gru_val_preds_all = np.array(gru_val_preds_all)
-        val_actual_values = np.array(val_actual_values)
-        val_scales = np.array(val_scales)
-        
-        # LightGBM 검증셋 예측 (41차원 스케일 정규화 피처 활용)
-        lgbm_val_preds_all = np.zeros_like(val_actual_values)
-        for horizon_idx, horizon in enumerate([1, 2, 3]):
-            val_lgbm_features = []
-            for idx, start_idx in enumerate(val_indices):
-                scale = val_scales[idx]
-                feat = get_lgbm_features_scaled(prices, seasonal_mean, sanji_mean, domae_mean, start_idx, horizon, scale)
-                val_lgbm_features.append(feat)
-            val_lgbm_features = np.array(val_lgbm_features)
-            
-            horizon_preds_scaled = []
-            for lgbm_models in lgbm_models_dict[item]:
+            # Predict validation using current seed's LGBM
+            lgbm_val_preds_seed = np.zeros_like(val_actual_values)
+            for horizon_idx, horizon in enumerate([1, 2, 3]):
+                val_lgbm_features = []
+                for idx, start_idx in enumerate(val_indices):
+                    scale = val_scales[idx]
+                    feat = get_lgbm_features_scaled(prices, seasonal_mean, sanji_mean, domae_mean, start_idx, horizon, scale)
+                    val_lgbm_features.append(feat)
+                val_lgbm_features = np.array(val_lgbm_features)
                 pred_scaled = lgbm_models[horizon_idx].predict(val_lgbm_features)
-                horizon_preds_scaled.append(pred_scaled)
+                lgbm_val_preds_seed[:, horizon_idx] = pred_scaled * val_scales
+                
+            lgbm_val_preds_total += lgbm_val_preds_seed / len(seeds)
             
-            mean_pred_scaled = np.mean(horizon_preds_scaled, axis=0)
-            lgbm_val_preds_all[:, horizon_idx] = mean_pred_scaled * val_scales
+        # --- Grid Search for Optimal Item-Specific Blending Weight ---
+        best_w = 0.4
+        best_val_nmae = float('inf')
+        
+        for w in np.linspace(0.0, 1.0, 21):
+            blended = w * gru_val_preds_total + (1.0 - w) * lgbm_val_preds_total
+            blended = np.clip(blended, 0.0, None)
             
-        # 가중 블렌딩 (0.4 * GRU + 0.6 * LightGBM)
-        blended_val_preds = 0.4 * gru_val_preds_all + 0.6 * lgbm_val_preds_all
-        blended_val_preds = np.clip(blended_val_preds, 0.0, None)
+            abs_errors = np.abs(val_actual_values - blended)
+            val_nmae = np.sum(abs_errors) / (np.sum(val_actual_values) + 1e-8)
+            if val_nmae < best_val_nmae:
+                best_val_nmae = val_nmae
+                best_w = w
+                
+        best_blend_weights[item] = best_w
+        blended_val_nmaes[item] = best_val_nmae
+        print(f"--> [Item: {item}] Best GRU Blend Weight: {best_w:.2f} | Blended Validation NMAE: {best_val_nmae:.4f}")
         
-        abs_errors = np.abs(val_actual_values - blended_val_preds)
-        val_nmae = np.sum(abs_errors) / (np.sum(val_actual_values) + 1e-8)
-        blended_val_nmaes[item] = val_nmae
-        print(f"--> Blended 5-Seed Ensemble Validation NMAE for {item}: {val_nmae:.4f}")
-        
-    print("\n=== Mean Blended Validation NMAE (Ensemble with Metadata) ===")
+    print("\n=== Mean Blended Validation NMAE (Advanced Optimization) ===")
     mean_nmae = np.mean(list(blended_val_nmaes.values()))
     print(f"Mean Blended NMAE: {mean_nmae:.4f}")
     
-    # 8. Inference on TEST sets (Requirement 5)
+    # 8. Inference on TEST sets
     print("\nStarting inference on TEST datasets...")
     predictions = {}
     
@@ -609,13 +667,16 @@ def main():
                 scale = np.mean(train_series[item]) if np.mean(train_series[item]) > 0 else 1.0
                 
             # [1] GRU 테스트 추론 (5개 시드 앙상블 평균)
+            in_p_scaled = test_prices / scale
+            roll_3, roll_5, ema_3 = compute_seq_features(in_p_scaled)
+            
             in_features = []
             for i in range(9):
                 step_idx = t_flat_idx - 8 + i
                 yr, m, sn, seas = flat_idx_to_date(step_idx)
                 cal_feats = get_calendar_features(yr, m, sn, seas)
                 
-                p_scaled = test_prices[i] / scale
+                p_scaled = in_p_scaled[i]
                 sm_scaled = train_seasonal_means[item][step_idx % 36] / scale
                 sj_scaled = train_sanji_means[item][step_idx % 36] / scale
                 dm_scaled = train_domae_means[item][step_idx % 36] / scale
@@ -625,7 +686,7 @@ def main():
                 else:
                     pct = (test_prices[i] - test_prices[i-1]) / (test_prices[i-1] + 1e-8)
                     
-                in_features.append([p_scaled, sm_scaled, sj_scaled, dm_scaled, pct] + cal_feats)
+                in_features.append([p_scaled, sm_scaled, sj_scaled, dm_scaled, pct, roll_3[i], roll_5[i], ema_3[i]] + cal_feats)
                 
             target_cal_features = []
             for i in range(3):
@@ -661,8 +722,9 @@ def main():
                     horizon_preds_scaled.append(pred_scaled)
                 pred_actual_lgbm[horizon_idx] = np.mean(horizon_preds_scaled, axis=0) * scale
                 
-            # [3] 블렌딩 및 음수 차단
-            pred_actual = 0.4 * pred_actual_gru + 0.6 * pred_actual_lgbm
+            # [3] 블렌딩 및 음수 차단 (Item-Specific Blending Weight 적용)
+            w = best_blend_weights[item]
+            pred_actual = w * pred_actual_gru + (1.0 - w) * pred_actual_lgbm
             pred_actual = np.clip(pred_actual, 0.0, None)
             
             predictions[test_idx][item] = pred_actual
