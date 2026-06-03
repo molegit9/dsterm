@@ -15,6 +15,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # Workspace directories
 workspace_dir = "c:/Dev/open"
 train_path = os.path.join(workspace_dir, "train/train.csv")
+sanji_path = os.path.join(workspace_dir, "train/meta/TRAIN_산지공판장_2018-2021.csv")
+domae_path = os.path.join(workspace_dir, "train/meta/TRAIN_전국도매_2018-2021.csv")
 test_dir = os.path.join(workspace_dir, "test")
 sample_submission_path = os.path.join(workspace_dir, "sample_submission.csv")
 submission_path = os.path.join(workspace_dir, "submission.csv")
@@ -78,25 +80,67 @@ def get_calendar_features(year, month, soon, season):
     
     return [y_norm, m_sin, m_cos, s_sin, s_cos] + season_oh
 
-# Item specifications and filters
+# Item specifications and filters for train, sanji, and domae (Requirement 2)
 items_conditions = {
-    '감자': lambda df: df[(df['품종명'] == '감자 수미') & (df['거래단위'] == '20키로상자') & (df['등급'] == '상')],
-    '건고추': lambda df: df[(df['품종명'] == '화건') & (df['거래단위'] == '30 kg') & (df['등급'] == '상품')],
-    '깐마늘(국산)': lambda df: df[(df['품목명'] == '깐마늘(국산)') & (df['거래단위'] == '20 kg') & (df['등급'] == '상품')],
-    '대파': lambda df: df[(df['품종명'] == '대파(일반)') & (df['거래단위'] == '1키로단') & (df['등급'] == '상')],
-    '무': lambda df: df[(df['품목명'] == '무') & (df['거래단위'] == '20키로상자') & (df['등급'] == '상')],
-    '배추': lambda df: df[(df['품목명'] == '배추') & (df['거래단위'] == '10키로망대') & (df['등급'] == '상')],
-    '사과': lambda df: df[(df['품목명'] == '사과') & (df['품종명'].isin(['홍로', '후지'])) & (df['거래단위'] == '10 개') & (df['등급'] == '상품')],
-    '상추': lambda df: df[(df['품목명'] == '상추') & (df['품종명'] == '청') & (df['거래단위'] == '100 g') & (df['등급'] == '상품')],
-    '양파': lambda df: df[(df['품목명'] == '양파') & (df['품종명'] == '양파') & (df['거래단위'] == '1키로') & (df['등급'] == '상')],
-    '배': lambda df: df[(df['품목명'] == '배') & (df['품종명'] == '신고') & (df['거래단위'] == '10 개') & (df['등급'] == '상품')]
+    '감자': {
+        'train': lambda df: df[(df['품종명'] == '감자 수미') & (df['거래단위'] == '20키로상자') & (df['등급'] == '상')],
+        'sanji': lambda df: df[(df['품목명'] == '감자') & (df['품종명'] == '수미') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '감자') & (df['품종명'] == '수미')]
+    },
+    '건고추': {
+        'train': lambda df: df[(df['품종명'] == '화건') & (df['거래단위'] == '30 kg') & (df['등급'] == '상품')],
+        'sanji': None,
+        'domae': None
+    },
+    '깐마늘(국산)': {
+        'train': lambda df: df[(df['품목명'] == '깐마늘(국산)') & (df['거래단위'] == '20 kg') & (df['등급'] == '상품')],
+        'sanji': lambda df: df[(df['품목명'] == '마늘') & (df['품종명'] == '깐마늘') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '마늘') & (df['품종명'] == '깐마늘')]
+    },
+    '대파': {
+        'train': lambda df: df[(df['품종명'] == '대파(일반)') & (df['거래단위'] == '1키로단') & (df['등급'] == '상')],
+        'sanji': lambda df: df[(df['품목명'] == '대파') & (df['품종명'] == '대파(일반)') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '대파') & (df['품종명'] == '대파(일반)')]
+    },
+    '무': {
+        'train': lambda df: df[(df['품목명'] == '무') & (df['거래단위'] == '20키로상자') & (df['등급'] == '상')],
+        'sanji': lambda df: df[(df['품목명'] == '무') & (df['품종명'] == '기타무') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '무') & (df['품종명'] == '무')]
+    },
+    '배추': {
+        'train': lambda df: df[(df['품목명'] == '배추') & (df['거래단위'] == '10키로망대') & (df['등급'] == '상')],
+        'sanji': lambda df: df[(df['품목명'] == '배추') & (df['품종명'] == '쌈배추') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '배추') & (df['품종명'] == '배추')]
+    },
+    '사과': {
+        'train': lambda df: df[(df['품목명'] == '사과') & (df['품종명'].isin(['홍로', '후지'])) & (df['거래단위'] == '10 개') & (df['등급'] == '상품')],
+        'sanji': lambda df: df[(df['품목명'] == '사과') & (df['품종명'] == '후지') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '사과') & (df['품종명'] == '후지')]
+    },
+    '상추': {
+        'train': lambda df: df[(df['품목명'] == '상추') & (df['품종명'] == '청') & (df['거래단위'] == '100 g') & (df['등급'] == '상품')],
+        'sanji': lambda df: df[(df['품목명'] == '상추') & (df['품종명'] == '청상추') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '상추') & (df['품종명'] == '청상추')]
+    },
+    '양파': {
+        'train': lambda df: df[(df['품목명'] == '양파') & (df['품종명'] == '양파') & (df['거래단위'] == '1키로') & (df['등급'] == '상')],
+        'sanji': lambda df: df[(df['품목명'] == '양파') & (df['품종명'] == '기타양파') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '양파') & (df['품종명'] == '양파(일반)')]
+    },
+    '배': {
+        'train': lambda df: df[(df['품목명'] == '배') & (df['품종명'] == '신고') & (df['거래단위'] == '10 개') & (df['등급'] == '상품')],
+        'sanji': lambda df: df[(df['품목명'] == '배') & (df['품종명'] == '신고') & (df['등급명'] == '상')],
+        'domae': lambda df: df[(df['품목명'] == '배') & (df['품종명'] == '신고')]
+    }
 }
 
-# Dataset Definition for PyTorch
+# Dataset Definition for PyTorch (Requirement 3)
 class SequenceDataset(Dataset):
-    def __init__(self, prices, seasonal_mean, start_idx_list):
+    def __init__(self, prices, seasonal_mean, sanji_mean, domae_mean, start_idx_list):
         self.prices = prices
         self.seasonal_mean = seasonal_mean
+        self.sanji_mean = sanji_mean
+        self.domae_mean = domae_mean
         self.start_indices = start_idx_list
         
     def __len__(self):
@@ -119,13 +163,16 @@ class SequenceDataset(Dataset):
             
             p_scaled = in_prices[i] / scale
             sm_scaled = self.seasonal_mean[step_idx % 36] / scale
+            sj_scaled = self.sanji_mean[step_idx % 36] / scale
+            dm_scaled = self.domae_mean[step_idx % 36] / scale
             
             if i == 0:
                 pct = 0.0
             else:
                 pct = (in_prices[i] - in_prices[i-1]) / (in_prices[i-1] + 1e-8)
                 
-            in_features.append([p_scaled, sm_scaled, pct] + cal_feats)
+            # 14차원 입력 피처 빌드: [p_scaled, sm_scaled, sj_scaled, dm_scaled, pct] + cal_feats
+            in_features.append([p_scaled, sm_scaled, sj_scaled, dm_scaled, pct] + cal_feats)
             
         target_cal_features = []
         for i in range(3):
@@ -133,7 +180,11 @@ class SequenceDataset(Dataset):
             yr, m, sn, seas = flat_idx_to_date(step_idx)
             cal_feats = get_calendar_features(yr, m, sn, seas)
             sm_scaled = self.seasonal_mean[step_idx % 36] / scale
-            target_cal_features.extend([sm_scaled] + cal_feats)
+            sj_scaled = self.sanji_mean[step_idx % 36] / scale
+            dm_scaled = self.domae_mean[step_idx % 36] / scale
+            
+            # 12차원 * 3시점 = 36차원 결합 타겟 피처 빌드
+            target_cal_features.extend([sm_scaled, sj_scaled, dm_scaled] + cal_feats)
             
         return (
             torch.tensor(in_features, dtype=torch.float32),
@@ -155,9 +206,9 @@ class CustomNMAELoss(nn.Module):
         loss = torch.sum(torch.abs(pred_actual - y_actual)) / (torch.sum(torch.abs(y_actual)) + 1e-8)
         return loss
 
-# PyTorch GRU-MLP 모델 아키텍처
+# PyTorch GRU-MLP 모델 아키텍처 (input_dim=14, target_cal_dim=36으로 확장)
 class PriceGRUMLP(nn.Module):
-    def __init__(self, input_dim=12, target_cal_dim=30, hidden_dim=64):
+    def __init__(self, input_dim=14, target_cal_dim=36, hidden_dim=64):
         super(PriceGRUMLP, self).__init__()
         self.gru = nn.GRU(
             input_size=input_dim,
@@ -182,14 +233,16 @@ class PriceGRUMLP(nn.Module):
         out = self.mlp(concat)
         return out
 
-# LightGBM 37차원 스케일 정규화 피처 생성 함수
-def get_lgbm_features_scaled(prices_series, seasonal_mean, start_idx, horizon, scale):
+# LightGBM 41차원 스케일 정규화 피처 생성 함수 (Requirement 4)
+def get_lgbm_features_scaled(prices_series, seasonal_mean, sanji_mean, domae_mean, start_idx, horizon, scale):
     in_p = prices_series[start_idx : start_idx + 9]
     in_p_scaled = in_p / scale
     
     yr_t, m_t, sn_t, seas_t = flat_idx_to_date(start_idx + 8)
     cal_feats_t = get_calendar_features(yr_t, m_t, sn_t, seas_t)
     sm_t_scaled = seasonal_mean[(start_idx + 8) % 36] / scale
+    sj_t_scaled = sanji_mean[(start_idx + 8) % 36] / scale
+    dm_t_scaled = domae_mean[(start_idx + 8) % 36] / scale
     
     pct_changes = []
     for i in range(1, 9):
@@ -199,15 +252,22 @@ def get_lgbm_features_scaled(prices_series, seasonal_mean, start_idx, horizon, s
     yr_th, m_th, sn_th, seas_th = flat_idx_to_date(start_idx + 8 + horizon)
     cal_feats_th = get_calendar_features(yr_th, m_th, sn_th, seas_th)
     sm_th_scaled = seasonal_mean[(start_idx + 8 + horizon) % 36] / scale
+    sj_th_scaled = sanji_mean[(start_idx + 8 + horizon) % 36] / scale
+    dm_th_scaled = domae_mean[(start_idx + 8 + horizon) % 36] / scale
     
-    feat = list(in_p_scaled) + cal_feats_t + [sm_t_scaled] + pct_changes + cal_feats_th + [sm_th_scaled]
+    feat = (
+        list(in_p_scaled) + cal_feats_t + [sm_t_scaled, sj_t_scaled, dm_t_scaled] +
+        pct_changes + cal_feats_th + [sm_th_scaled, sj_th_scaled, dm_th_scaled]
+    )
     return feat
 
-def get_test_lgbm_features_scaled(test_prices, seasonal_mean, t_flat_idx, horizon, scale):
+def get_test_lgbm_features_scaled(test_prices, seasonal_mean, sanji_mean, domae_mean, t_flat_idx, horizon, scale):
     in_p_scaled = test_prices / scale
     yr_t, m_t, sn_t, seas_t = flat_idx_to_date(t_flat_idx)
     cal_feats_t = get_calendar_features(yr_t, m_t, sn_t, seas_t)
     sm_t_scaled = seasonal_mean[t_flat_idx % 36] / scale
+    sj_t_scaled = sanji_mean[t_flat_idx % 36] / scale
+    dm_t_scaled = domae_mean[t_flat_idx % 36] / scale
     
     pct_changes = []
     for i in range(1, 9):
@@ -217,8 +277,13 @@ def get_test_lgbm_features_scaled(test_prices, seasonal_mean, t_flat_idx, horizo
     yr_th, m_th, sn_th, seas_th = flat_idx_to_date(t_flat_idx + horizon)
     cal_feats_th = get_calendar_features(yr_th, m_th, sn_th, seas_th)
     sm_th_scaled = seasonal_mean[(t_flat_idx + horizon) % 36] / scale
+    sj_th_scaled = sanji_mean[(t_flat_idx + horizon) % 36] / scale
+    dm_th_scaled = domae_mean[(t_flat_idx + horizon) % 36] / scale
     
-    feat = list(in_p_scaled) + cal_feats_t + [sm_t_scaled] + pct_changes + cal_feats_th + [sm_th_scaled]
+    feat = (
+        list(in_p_scaled) + cal_feats_t + [sm_t_scaled, sj_t_scaled, dm_t_scaled] +
+        pct_changes + cal_feats_th + [sm_th_scaled, sj_th_scaled, dm_th_scaled]
+    )
     return feat
 
 def main():
@@ -230,15 +295,26 @@ def main():
     years_list = ["2018", "2019", "2020", "2021"]
     all_train_periods = [f"{y}{m}{s}" for y in years_list for m in months_list for s in soons_list]
     
-    # Load train.csv and clean/align data
+    # Load datasets (Requirement 1)
     print("Loading train.csv...")
     train_df = pd.read_csv(train_path, encoding='utf-8-sig')
+    print("Loading TRAIN_산지공판장_2018-2021.csv...")
+    sanji_df = pd.read_csv(sanji_path, encoding='utf-8-sig')
+    print("Loading TRAIN_전국도매_2018-2021.csv...")
+    domae_df = pd.read_csv(domae_path, encoding='utf-8-sig')
     
     train_series = {}
     train_seasonal_means = {}
     
-    for item, cond in items_conditions.items():
-        sub_df = cond(train_df).copy()
+    train_sanji_series = {}
+    train_sanji_means = {}
+    
+    train_domae_series = {}
+    train_domae_means = {}
+    
+    for item, conds in items_conditions.items():
+        # [1] Retail train series
+        sub_df = conds['train'](train_df).copy()
         grouped = sub_df.groupby('시점')['평균가격(원)'].max().reset_index()
         grouped = grouped.set_index('시점').reindex(all_train_periods)
         prices = grouped['평균가격(원)'].replace(0, np.nan).values
@@ -255,7 +331,7 @@ def main():
                 
         train_series[item] = prices
         
-        # Calculate seasonal means
+        # Calculate train seasonal means
         seasonal_sum = np.zeros(36)
         seasonal_cnt = np.zeros(36)
         for idx, p in enumerate(prices):
@@ -264,6 +340,76 @@ def main():
             seasonal_cnt[p_idx] += 1
         train_seasonal_means[item] = seasonal_sum / seasonal_cnt
         
+        # [2] Sanji series (Requirement 2)
+        if conds['sanji'] is not None:
+            sub_sanji = conds['sanji'](sanji_df).copy()
+            grouped_sj = sub_sanji.groupby('시점')['평균가(원/kg)'].mean().reset_index()
+            grouped_sj = grouped_sj.set_index('시점').reindex(all_train_periods)
+            sj_prices = grouped_sj['평균가(원/kg)'].replace(0, np.nan).values
+            
+            mask_sj = np.isnan(sj_prices)
+            if mask_sj.all():
+                sj_prices = np.zeros_like(sj_prices)
+            else:
+                idx_sj = np.where(~mask_sj)[0]
+                sj_prices[:idx_sj[0]] = sj_prices[idx_sj[0]]
+                sj_prices[idx_sj[-1]:] = sj_prices[idx_sj[-1]]
+                for i in range(len(idx_sj) - 1):
+                    sj_prices[idx_sj[i]:idx_sj[i+1]] = sj_prices[idx_sj[i]]
+                sj_prices = np.nan_to_num(sj_prices, nan=0.0)
+        else:
+            sj_prices = np.zeros(144)
+            
+        train_sanji_series[item] = sj_prices
+        
+        # Calculate seasonal means for sanji
+        seasonal_sum_sj = np.zeros(36)
+        seasonal_cnt_sj = np.zeros(36)
+        for idx, p in enumerate(sj_prices):
+            p_idx = idx % 36
+            seasonal_sum_sj[p_idx] += p
+            seasonal_cnt_sj[p_idx] += 1
+            
+        train_sanji_means[item] = np.zeros(36)
+        for idx in range(36):
+            if seasonal_cnt_sj[idx] > 0:
+                train_sanji_means[item][idx] = seasonal_sum_sj[idx] / seasonal_cnt_sj[idx]
+                
+        # [3] Domae series (Requirement 2)
+        if conds['domae'] is not None:
+            sub_domae = conds['domae'](domae_df).copy()
+            grouped_dm = sub_domae.groupby('시점')['평균가(원/kg)'].mean().reset_index()
+            grouped_dm = grouped_dm.set_index('시점').reindex(all_train_periods)
+            dm_prices = grouped_dm['평균가(원/kg)'].replace(0, np.nan).values
+            
+            mask_dm = np.isnan(dm_prices)
+            if mask_dm.all():
+                dm_prices = np.zeros_like(dm_prices)
+            else:
+                idx_dm = np.where(~mask_dm)[0]
+                dm_prices[:idx_dm[0]] = dm_prices[idx_dm[0]]
+                dm_prices[idx_dm[-1]:] = dm_prices[idx_dm[-1]]
+                for i in range(len(idx_dm) - 1):
+                    dm_prices[idx_dm[i]:idx_dm[i+1]] = dm_prices[idx_dm[i]]
+                dm_prices = np.nan_to_num(dm_prices, nan=0.0)
+        else:
+            dm_prices = np.zeros(144)
+            
+        train_domae_series[item] = dm_prices
+        
+        # Calculate seasonal means for domae
+        seasonal_sum_dm = np.zeros(36)
+        seasonal_cnt_dm = np.zeros(36)
+        for idx, p in enumerate(dm_prices):
+            p_idx = idx % 36
+            seasonal_sum_dm[p_idx] += p
+            seasonal_cnt_dm[p_idx] += 1
+            
+        train_domae_means[item] = np.zeros(36)
+        for idx in range(36):
+            if seasonal_cnt_dm[idx] > 0:
+                train_domae_means[item][idx] = seasonal_sum_dm[idx] / seasonal_cnt_dm[idx]
+                
     seeds = [42, 100, 2021, 2022, 2026] # 5-seed ensembling
     models_dict = {}
     lgbm_models_dict = {}
@@ -275,6 +421,8 @@ def main():
         print(f"======================================")
         prices = train_series[item]
         seasonal_mean = train_seasonal_means[item]
+        sanji_mean = train_sanji_means[item]
+        domae_mean = train_domae_means[item]
         
         train_indices = list(range(110))
         val_indices = list(range(110, 133))
@@ -291,16 +439,16 @@ def main():
                 
             print(f"[{item}] Training Seed {seed} ({seed_idx+1}/{len(seeds)})...")
             
-            # --- PyTorch GRU 모델 학습 ---
-            train_dataset = SequenceDataset(prices, seasonal_mean, train_indices)
+            # --- PyTorch GRU 모델 학습 (input_dim=14, target_cal_dim=36) ---
+            train_dataset = SequenceDataset(prices, seasonal_mean, sanji_mean, domae_mean, train_indices)
             train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
             
-            model = PriceGRUMLP(input_dim=12, target_cal_dim=30, hidden_dim=64).to(device)
+            model = PriceGRUMLP(input_dim=14, target_cal_dim=36, hidden_dim=64).to(device)
             criterion = CustomNMAELoss()
             optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
             scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=180)
             
-            val_dataset = SequenceDataset(prices, seasonal_mean, val_indices)
+            val_dataset = SequenceDataset(prices, seasonal_mean, sanji_mean, domae_mean, val_indices)
             val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
             
             best_val_loss = float('inf')
@@ -337,7 +485,7 @@ def main():
             model.load_state_dict(best_model_state)
             models_dict[item].append(model)
             
-            # --- LightGBM 모델 학습 (Scale Normalization 적용) ---
+            # --- LightGBM 모델 학습 (Scale Normalization 및 41차원 피처 적용) ---
             lgbm_models = []
             for horizon in [1, 2, 3]:
                 lgbm_features = []
@@ -346,7 +494,7 @@ def main():
                     scale = prices[start_idx + 8]
                     if scale == 0:
                         scale = np.mean(prices) if np.mean(prices) > 0 else 1.0
-                    feat = get_lgbm_features_scaled(prices, seasonal_mean, start_idx, horizon, scale)
+                    feat = get_lgbm_features_scaled(prices, seasonal_mean, sanji_mean, domae_mean, start_idx, horizon, scale)
                     lgbm_features.append(feat)
                     lgbm_targets_scaled.append(prices[start_idx + 8 + horizon] / scale)
                     
@@ -368,7 +516,7 @@ def main():
             lgbm_models_dict[item].append(lgbm_models)
             
         # --- 검증 셋 평가: 5개 시드 앙상블 블렌딩 ---
-        val_dataset = SequenceDataset(prices, seasonal_mean, val_indices)
+        val_dataset = SequenceDataset(prices, seasonal_mean, sanji_mean, domae_mean, val_indices)
         val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
         
         gru_val_preds_all = []
@@ -392,13 +540,13 @@ def main():
         val_actual_values = np.array(val_actual_values)
         val_scales = np.array(val_scales)
         
-        # LightGBM 검증셋 예측 (Scale-Normalized 5개 시드 평균)
+        # LightGBM 검증셋 예측 (41차원 스케일 정규화 피처 활용)
         lgbm_val_preds_all = np.zeros_like(val_actual_values)
         for horizon_idx, horizon in enumerate([1, 2, 3]):
             val_lgbm_features = []
             for idx, start_idx in enumerate(val_indices):
                 scale = val_scales[idx]
-                feat = get_lgbm_features_scaled(prices, seasonal_mean, start_idx, horizon, scale)
+                feat = get_lgbm_features_scaled(prices, seasonal_mean, sanji_mean, domae_mean, start_idx, horizon, scale)
                 val_lgbm_features.append(feat)
             val_lgbm_features = np.array(val_lgbm_features)
             
@@ -410,7 +558,7 @@ def main():
             mean_pred_scaled = np.mean(horizon_preds_scaled, axis=0)
             lgbm_val_preds_all[:, horizon_idx] = mean_pred_scaled * val_scales
             
-        # 가중 블렌딩
+        # 가중 블렌딩 (0.4 * GRU + 0.6 * LightGBM)
         blended_val_preds = 0.4 * gru_val_preds_all + 0.6 * lgbm_val_preds_all
         blended_val_preds = np.clip(blended_val_preds, 0.0, None)
         
@@ -419,11 +567,11 @@ def main():
         blended_val_nmaes[item] = val_nmae
         print(f"--> Blended 5-Seed Ensemble Validation NMAE for {item}: {val_nmae:.4f}")
         
-    print("\n=== Mean Blended Validation NMAE (Seed Ensemble with Scale Normalization) ===")
+    print("\n=== Mean Blended Validation NMAE (Ensemble with Metadata) ===")
     mean_nmae = np.mean(list(blended_val_nmaes.values()))
     print(f"Mean Blended NMAE: {mean_nmae:.4f}")
     
-    # 8. Inference on TEST sets
+    # 8. Inference on TEST sets (Requirement 5)
     print("\nStarting inference on TEST datasets...")
     predictions = {}
     
@@ -437,7 +585,7 @@ def main():
         t_flat_idx = (2022 - 2018) * 36 + (m_t - 1) * 3 + (soon_t - 1)
         
         for item in items_conditions.keys():
-            cond = items_conditions[item]
+            cond = items_conditions[item]['train']
             sub_test = cond(test_df).copy()
             
             steps = [f"T-{i}순" for i in range(8, 0, -1)] + ["T"]
@@ -469,13 +617,15 @@ def main():
                 
                 p_scaled = test_prices[i] / scale
                 sm_scaled = train_seasonal_means[item][step_idx % 36] / scale
+                sj_scaled = train_sanji_means[item][step_idx % 36] / scale
+                dm_scaled = train_domae_means[item][step_idx % 36] / scale
                 
                 if i == 0:
                     pct = 0.0
                 else:
                     pct = (test_prices[i] - test_prices[i-1]) / (test_prices[i-1] + 1e-8)
                     
-                in_features.append([p_scaled, sm_scaled, pct] + cal_feats)
+                in_features.append([p_scaled, sm_scaled, sj_scaled, dm_scaled, pct] + cal_feats)
                 
             target_cal_features = []
             for i in range(3):
@@ -483,7 +633,9 @@ def main():
                 yr, m, sn, seas = flat_idx_to_date(step_idx)
                 cal_feats = get_calendar_features(yr, m, sn, seas)
                 sm_scaled = train_seasonal_means[item][step_idx % 36] / scale
-                target_cal_features.extend([sm_scaled] + cal_feats)
+                sj_scaled = train_sanji_means[item][step_idx % 36] / scale
+                dm_scaled = train_domae_means[item][step_idx % 36] / scale
+                target_cal_features.extend([sm_scaled, sj_scaled, dm_scaled] + cal_feats)
                 
             x_seq_tensor = torch.tensor([in_features], dtype=torch.float32).to(device)
             x_target_cal_tensor = torch.tensor([target_cal_features], dtype=torch.float32).to(device)
@@ -499,7 +651,9 @@ def main():
             # [2] LightGBM 테스트 추론 (Scale-Normalized 5개 시드 평균)
             pred_actual_lgbm = np.zeros(3)
             for horizon_idx, horizon in enumerate([1, 2, 3]):
-                lgbm_feat = get_test_lgbm_features_scaled(test_prices, train_seasonal_means[item], t_flat_idx, horizon, scale)
+                lgbm_feat = get_test_lgbm_features_scaled(
+                    test_prices, train_seasonal_means[item], train_sanji_means[item], train_domae_means[item], t_flat_idx, horizon, scale
+                )
                 
                 horizon_preds_scaled = []
                 for lgbm_models in lgbm_models_dict[item]:
