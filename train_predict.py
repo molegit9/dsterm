@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
+from lightgbm import LGBMRegressor # 요구사항 3: LightGBM 라이브러리 추가
 
 # Set random seeds for reproducibility
 torch.manual_seed(42)
@@ -23,7 +24,6 @@ sample_submission_path = os.path.join(workspace_dir, "sample_submission.csv")
 submission_path = os.path.join(workspace_dir, "submission.csv")
 
 # 1. Test T calendar date mappings
-# Format: test_idx -> (month, soon_idx) where soon_idx: 1=상순, 2=중순, 3=하순
 test_t_mappings = {
     0: (10, 1),
     1: (11, 1),
@@ -126,7 +126,6 @@ for item, cond in items_conditions.items():
     if mask.all():
         prices = np.zeros_like(prices)
     else:
-        # manual ffill/bfill to avoid pandas deprecation warning
         idx = np.where(~mask)[0]
         prices[:idx[0]] = prices[idx[0]]
         prices[idx[-1]:] = prices[idx[-1]]
@@ -156,31 +155,24 @@ class SequenceDataset(Dataset):
         
     def __getitem__(self, idx):
         start = self.start_indices[idx]
-        # Input sequence (9 steps)
         in_prices = self.prices[start : start + 9]
-        # Target scale: price at T (index start + 8)
         scale = in_prices[-1]
         if scale == 0:
             scale = np.mean(self.prices) if np.mean(self.prices) > 0 else 1.0
             
-        # Target prices (3 steps)
         target_prices = self.prices[start + 9 : start + 12]
         
-        # Build features for 9 input steps
         in_features = []
         for i in range(9):
             step_idx = start + i
-            # Flat calendar index to date details
             yr, m, sn, seas = flat_idx_to_date(step_idx)
             cal_feats = get_calendar_features(yr, m, sn, seas)
             
-            # Scaled price and seasonal mean
             p_scaled = in_prices[i] / scale
             sm_scaled = self.seasonal_mean[step_idx % 36] / scale
             
             in_features.append([p_scaled, sm_scaled] + cal_feats)
             
-        # Build calendar features for 3 target steps
         target_cal_features = []
         for i in range(3):
             step_idx = start + 9 + i
@@ -196,7 +188,25 @@ class SequenceDataset(Dataset):
             torch.tensor(scale, dtype=torch.float32)
         )
 
-# 6. PyTorch Model Architecture
+# [요구사항 1: Custom NMAE Loss 구현]
+# 실제 대회 평가 지표인 NMAE를 직접 최소화하기 위한 Custom Loss 함수
+class CustomNMAELoss(nn.Module):
+    def __init__(self):
+        super(CustomNMAELoss, self).__init__()
+        
+    def forward(self, pred_scaled, y_target, scale):
+        # pred_scaled와 y_target은 scale로 나누어진 상태이므로, scale을 곱해 실제 원화 스케일로 복원
+        if scale.dim() == 1:
+            scale = scale.unsqueeze(1)
+        pred_actual = pred_scaled * scale
+        y_actual = y_target * scale
+        
+        # NMAE 수식 적용: sum(|pred_actual - y_actual|) / (sum(|y_actual|) + 1e-8)
+        loss = torch.sum(torch.abs(pred_actual - y_actual)) / (torch.sum(torch.abs(y_actual)) + 1e-8)
+        return loss
+
+# [요구사항 2: GRU 모델 아키텍처 규제 완화]
+# BatchNorm 제거 및 Dropout 비율을 0.1로 하향 조정하여 적은 샘플 수에 대응
 class PriceGRUMLP(nn.Module):
     def __init__(self, input_dim=11, target_cal_dim=30, hidden_dim=64):
         super(PriceGRUMLP, self).__init__()
@@ -208,60 +218,50 @@ class PriceGRUMLP(nn.Module):
         )
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim + target_cal_dim, 64),
-            nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1), # Dropout 0.2 -> 0.1로 변경
             nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(0.1), # Dropout 0.2 -> 0.1로 변경
             nn.Linear(32, 3)
         )
         
     def forward(self, x_seq, x_target_cal):
-        # GRU encode
-        _, h_n = self.gru(x_seq) # h_n shape: (1, batch, hidden_dim)
-        h_n = h_n.squeeze(0) # shape: (batch, hidden_dim)
-        
-        # Concatenate with target calendar features
+        _, h_n = self.gru(x_seq)
+        h_n = h_n.squeeze(0)
         concat = torch.cat([h_n, x_target_cal], dim=-1)
-        
-        # Predict 3 steps
         out = self.mlp(concat)
         return out
 
-# 7. Model Training Loop
+# 7. Model Training & Validation Loop
 models = {}
-val_nmaes = {}
+lgbm_models_dict = {} # 요구사항 3: LightGBM 모델 저장용 딕셔너리
+blended_val_nmaes = {}
 
 for item in items_conditions.keys():
-    print(f"\n--- Training Model for: {item} ---")
+    print(f"\n--- Training Models for: {item} ---")
     prices = train_series[item]
     seasonal_mean = train_seasonal_means[item]
     
-    # Train / Val splits based on start indices
-    # Total periods = 144
-    # Sliding window needs 12 steps (9 input + 3 target)
-    # Train indices: 0 to 110 (targets fall within first 122 periods)
-    # Val indices: 111 to 132 (targets fall within final 24 periods of training)
+    # Train / Val 분할
     train_indices = list(range(110))
     val_indices = list(range(110, 133))
     
+    # --- [PyTorch GRU-MLP 학습 단계] ---
     train_dataset = SequenceDataset(prices, seasonal_mean, train_indices)
     val_dataset = SequenceDataset(prices, seasonal_mean, val_indices)
     
     train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False)
     
-    # Instantiate Model
-    # input_dim: 1 (scaled price) + 1 (scaled seasonal mean) + 9 (calendar features) = 11
-    # target_cal_dim: 3 * [1 (scaled seasonal mean) + 9 (calendar)] = 30
     model = PriceGRUMLP(input_dim=11, target_cal_dim=30, hidden_dim=64).to(device)
-    criterion = nn.L1Loss() # MAE Loss
-    optimizer = optim.AdamW(model.parameters(), lr=0.005, weight_decay=1e-4)
+    
+    # 요구사항 1 적용: CustomNMAELoss 사용
+    criterion = CustomNMAELoss() 
+    # 요구사항 2 적용: 학습률(lr)을 0.001로 하향 조정
+    optimizer = optim.AdamW(model.parameters(), lr=0.001, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=120)
     
-    # Training Loop
     best_val_loss = float('inf')
     best_model_state = None
     
@@ -269,11 +269,11 @@ for item in items_conditions.keys():
         model.train()
         train_loss = 0.0
         for x_seq, x_target_cal, y_target, scale in train_loader:
-            x_seq, x_target_cal, y_target = x_seq.to(device), x_target_cal.to(device), y_target.to(device)
+            x_seq, x_target_cal, y_target, scale = x_seq.to(device), x_target_cal.to(device), y_target.to(device), scale.to(device)
             
             optimizer.zero_grad()
             pred = model(x_seq, x_target_cal)
-            loss = criterion(pred, y_target)
+            loss = criterion(pred, y_target, scale) # CustomNMAELoss 계산에 scale 전달
             loss.backward()
             optimizer.step()
             
@@ -287,9 +287,9 @@ for item in items_conditions.keys():
         val_loss = 0.0
         with torch.no_grad():
             for x_seq, x_target_cal, y_target, scale in val_loader:
-                x_seq, x_target_cal, y_target = x_seq.to(device), x_target_cal.to(device), y_target.to(device)
+                x_seq, x_target_cal, y_target, scale = x_seq.to(device), x_target_cal.to(device), y_target.to(device), scale.to(device)
                 pred = model(x_seq, x_target_cal)
-                loss = criterion(pred, y_target)
+                loss = criterion(pred, y_target, scale)
                 val_loss += loss.item() * x_seq.size(0)
         val_loss /= len(val_dataset)
         
@@ -298,33 +298,83 @@ for item in items_conditions.keys():
             best_model_state = model.state_dict().copy()
             
         if (epoch + 1) % 30 == 0:
-            print(f"Epoch {epoch+1:3d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
+            print(f"GRU Epoch {epoch+1:3d} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}")
             
-    # Load best weights
     model.load_state_dict(best_model_state)
     models[item] = model
     
-    # Calculate NMAE on Validation set
+    # --- [요구사항 3: LightGBM 파이프라인 추가 및 학습] ---
+    # 슬라이딩 윈도우 구조를 기반으로 19차원 피처 벡터 생성 및 실제 원화 가격(KRW)으로 학습 진행
+    lgbm_features = []
+    lgbm_targets = []
+    for start_idx in train_indices:
+        in_p = prices[start_idx : start_idx + 9]
+        yr, m, sn, seas = flat_idx_to_date(start_idx + 8)
+        cal_feats = get_calendar_features(yr, m, sn, seas)
+        sm_t = seasonal_mean[(start_idx + 8) % 36]
+        feat = list(in_p) + cal_feats + [sm_t] # 9 + 9 + 1 = 19차원 피처 벡터
+        lgbm_features.append(feat)
+        
+        y_t = prices[start_idx + 9 : start_idx + 12] # T+1, T+2, T+3 시점의 실제 원화 가격
+        lgbm_targets.append(y_t)
+        
+    lgbm_features = np.array(lgbm_features)
+    lgbm_targets = np.array(lgbm_targets)
+    
+    # 3개 시점(T+1, T+2, T+3) 각각을 독립적으로 예측할 모델 생성 및 학습
+    lgbm_models = []
+    for horizon in range(3):
+        lgbm_model = LGBMRegressor(random_state=42, n_estimators=100)
+        lgbm_model.fit(lgbm_features, lgbm_targets[:, horizon])
+        lgbm_models.append(lgbm_model)
+    lgbm_models_dict[item] = lgbm_models
+    print(f"{item} LightGBM 학습 완료.")
+    
+    # --- [모델 검증 단계: GRU와 LightGBM Validation 앙상블 NMAE 평가] ---
+    # GRU 검증 예측 생성
     model.eval()
-    abs_errors = []
-    actual_values = []
+    gru_val_preds = []
+    val_actual_values = []
+    val_scales = []
     with torch.no_grad():
         for x_seq, x_target_cal, y_target, scale in val_loader:
             x_seq, x_target_cal = x_seq.to(device), x_target_cal.to(device)
             pred_scaled = model(x_seq, x_target_cal).cpu().numpy()
-            y_actual = (y_target.numpy() * scale.numpy()[:, None])
-            pred_actual = (pred_scaled * scale.numpy()[:, None])
+            pred_actual = pred_scaled * scale.numpy()[:, None]
+            gru_val_preds.extend(pred_actual)
+            val_actual_values.extend(y_target.numpy() * scale.numpy()[:, None])
+            val_scales.extend(scale.numpy())
             
-            abs_errors.extend(np.abs(y_actual - pred_actual).flatten())
-            actual_values.extend(y_actual.flatten())
-            
-    val_nmae = np.sum(abs_errors) / np.sum(actual_values)
-    val_nmaes[item] = val_nmae
-    print(f"Validation NMAE for {item}: {val_nmae:.4f}")
+    gru_val_preds = np.array(gru_val_preds)
+    val_actual_values = np.array(val_actual_values)
+    
+    # LightGBM 검증 예측 생성
+    val_lgbm_features = []
+    for start_idx in val_indices:
+        in_p = prices[start_idx : start_idx + 9]
+        yr, m, sn, seas = flat_idx_to_date(start_idx + 8)
+        cal_feats = get_calendar_features(yr, m, sn, seas)
+        sm_t = seasonal_mean[(start_idx + 8) % 36]
+        feat = list(in_p) + cal_feats + [sm_t]
+        val_lgbm_features.append(feat)
+        
+    val_lgbm_features = np.array(val_lgbm_features)
+    lgbm_val_preds = np.zeros_like(val_actual_values)
+    for horizon in range(3):
+        lgbm_val_preds[:, horizon] = lgbm_models[horizon].predict(val_lgbm_features)
+        
+    # 요구사항 4 적용: 0.4 * GRU + 0.6 * LightGBM 가중 평균 앙상블 블렌딩
+    blended_val_preds = 0.4 * gru_val_preds + 0.6 * lgbm_val_preds
+    blended_val_preds = np.clip(blended_val_preds, 0.0, None)
+    
+    abs_errors = np.abs(val_actual_values - blended_val_preds)
+    val_nmae = np.sum(abs_errors) / (np.sum(val_actual_values) + 1e-8)
+    blended_val_nmaes[item] = val_nmae
+    print(f"Validation Blended NMAE for {item}: {val_nmae:.4f}")
 
-print("\n=== Mean Validation NMAE ===")
-mean_nmae = np.mean(list(val_nmaes.values()))
-print(f"Mean NMAE: {mean_nmae:.4f}")
+print("\n=== Mean Blended Validation NMAE ===")
+mean_nmae = np.mean(list(blended_val_nmaes.values()))
+print(f"Mean Blended NMAE: {mean_nmae:.4f}")
 
 # 8. Inference on TEST sets
 print("\nStarting inference on TEST datasets...")
@@ -333,33 +383,24 @@ predictions = {} # test_idx -> {item: [pred_t1, pred_t2, pred_t3]}
 for test_idx in range(25):
     predictions[test_idx] = {}
     
-    # Load TEST_xx.csv
     test_file_path = os.path.join(test_dir, f"TEST_{test_idx:02d}.csv")
     test_df = pd.read_csv(test_file_path, encoding='utf-8-sig')
     
-    # Get T calendar date mapping
     m_t, soon_t = test_t_mappings[test_idx]
-    # flat index for T in 2022
     t_flat_idx = (2022 - 2018) * 36 + (m_t - 1) * 3 + (soon_t - 1)
     
     for item in items_conditions.keys():
-        # Filter test data for the item
         cond = items_conditions[item]
         sub_test = cond(test_df).copy()
         
-        # We need a sequence of length 9 corresponding to T-8 to T
-        # Match T-8 to T to chronological steps
         steps = [f"T-{i}순" for i in range(8, 0, -1)] + ["T"]
         
-        # Group by 시점 and take max (to handle apple or duplicates)
         grouped_test = sub_test.groupby('시점')['평균가격(원)'].max().reset_index()
         grouped_test = grouped_test.set_index('시점').reindex(steps)
         
-        # Clean price sequence
         test_prices = grouped_test['평균가격(원)'].replace(0, np.nan).values
         mask = np.isnan(test_prices)
         if mask.all():
-            # If all are missing, backfill with overall seasonal mean or training mean
             test_prices = np.array([train_seasonal_means[item][(t_flat_idx - 8 + i) % 36] for i in range(9)])
         else:
             idx = np.where(~mask)[0]
@@ -368,12 +409,11 @@ for test_idx in range(25):
             for i in range(len(idx) - 1):
                 test_prices[idx[i]:idx[i+1]] = test_prices[idx[i]]
                 
-        # Scale factor: price at T (last step)
         scale = test_prices[-1]
         if scale == 0:
             scale = np.mean(train_series[item]) if np.mean(train_series[item]) > 0 else 1.0
             
-        # Build features for T-8 to T (9 steps)
+        # --- [1] GRU 추론 피처 구성 및 예측 ---
         in_features = []
         for i in range(9):
             step_idx = t_flat_idx - 8 + i
@@ -385,7 +425,6 @@ for test_idx in range(25):
             
             in_features.append([p_scaled, sm_scaled] + cal_feats)
             
-        # Build calendar features for T+1, T+2, T+3
         target_cal_features = []
         for i in range(3):
             step_idx = t_flat_idx + 1 + i
@@ -394,7 +433,6 @@ for test_idx in range(25):
             sm_scaled = train_seasonal_means[item][step_idx % 36] / scale
             target_cal_features.extend([sm_scaled] + cal_feats)
             
-        # Predict using model
         model = models[item]
         model.eval()
         
@@ -402,10 +440,23 @@ for test_idx in range(25):
         x_target_cal_tensor = torch.tensor([target_cal_features], dtype=torch.float32).to(device)
         
         with torch.no_grad():
-            pred_scaled = model(x_seq_tensor, x_target_cal_tensor).cpu().numpy()[0]
+            pred_scaled_gru = model(x_seq_tensor, x_target_cal_tensor).cpu().numpy()[0]
+        
+        pred_actual_gru = pred_scaled_gru * scale
+        
+        # --- [2] LightGBM 추론 피처 구성 및 예측 ---
+        yr_t, m_t_cal, sn_t_cal, seas_t_cal = flat_idx_to_date(t_flat_idx)
+        cal_feats_t = get_calendar_features(yr_t, m_t_cal, sn_t_cal, seas_t_cal)
+        sm_t = train_seasonal_means[item][t_flat_idx % 36]
+        lgbm_feat = list(test_prices) + cal_feats_t + [sm_t]
+        
+        lgbm_models = lgbm_models_dict[item]
+        pred_actual_lgbm = np.zeros(3)
+        for horizon in range(3):
+            pred_actual_lgbm[horizon] = lgbm_models[horizon].predict([lgbm_feat])[0]
             
-        # Denormalize and clip to non-negative
-        pred_actual = pred_scaled * scale
+        # --- [3] 요구사항 4: 0.4 * GRU + 0.6 * LightGBM 블렌딩 및 음수 방지 클리핑 ---
+        pred_actual = 0.4 * pred_actual_gru + 0.6 * pred_actual_lgbm
         pred_actual = np.clip(pred_actual, 0.0, None)
         
         predictions[test_idx][item] = pred_actual
@@ -414,7 +465,6 @@ for test_idx in range(25):
 print("\nGenerating submission.csv...")
 sub_df = pd.read_csv(sample_submission_path, encoding='utf-8-sig')
 
-# Map of items to columns in submission
 item_col_map = {
     '감자': '감자',
     '건고추': '건고추',
@@ -430,7 +480,6 @@ item_col_map = {
 
 for i in range(len(sub_df)):
     row = sub_df.iloc[i]
-    # 시점 format is "TEST_xx+y순" (e.g. "TEST_00+1순")
     sijum = row['시점']
     test_idx = int(sijum.split('+')[0].split('_')[1])
     horizon = int(sijum.split('+')[1][0]) # 1, 2, or 3
